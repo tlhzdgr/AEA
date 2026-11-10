@@ -1,0 +1,250 @@
+---
+title: "01 · Data processing: lab, online and AEA samples"
+subtitle: "A 'Human-Like' Stroop Effect No Longer Implies a Human Participant: Method"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+Turns the anonymized raw exports in `data/raw/` (written by `00_anonymize_raw.py`) into the processed files used by
+all later steps, and checks each design fact stated in the Method. No respondent and no trial is excluded.
+
+| Manuscript (Method) | Section here | Output |
+|---|---|---|
+| *Samples*: 51 per sample; 51 of 54 online respondents drawn at random | 2 | `data/processed/sample_flow.csv` |
+| *Task and Design*: 12 practice trials, 288 trials (96 per condition), 2,000 ms deadline | 3 | `outputs/tables/task_structure_check.csv` |
+| *Data Processing and Analysis*: correct, incorrect, miss; no trimming | 4 | `data/processed/trials_all.csv` |
+| *Data Processing and Analysis*: task accuracy, mean correct RT, congruency effects | 5 | `data/processed/respondent_summary.csv` |
+| *Conventional Quality Checks*: six criteria | 6 | `data/processed/respondent_qc.csv` |
+
+Sample codes: `Lab`, `Online`, `AEA` (artificial experiment agent). The AGEA sample is processed in `04_agea_data_processing.Rmd`.
+
+# Settings
+
+```{r settings}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+
+ROOT     <- file.path("..")                       # paths are relative to analysis/
+RAW_DIR  <- file.path(ROOT, "data", "raw")
+PROC_DIR <- file.path(ROOT, "data", "processed")
+TAB_DIR  <- file.path(ROOT, "outputs", "tables")
+walk(c(PROC_DIR, TAB_DIR), dir.create, recursive = TRUE, showWarnings = FALSE)
+
+RAW_FILES <- c(Lab = "raw_lab.csv", Online = "raw_online.csv", AEA = "raw_aea.csv")
+SAMPLES    <- c("Lab", "Online", "AEA")
+CONDITIONS <- c("congruent", "neutral", "incongruent")
+
+N_PER_SAMPLE  <- 51      # Method, Samples
+TRIALS_PER_PP <- 288     # Method, Task and Design
+SEED_ONLINE   <- 19      # random draw of 51 of the 54 online respondents
+
+# Method, Conventional Quality Checks
+QC <- list(acc_min = 0.80, rt_fast_ms = 300, sd_threshold = 3, miss_max = 0.10, min_keys = 4)
+
+show_table <- function(df, caption) {
+  df |> kable(caption = caption, format.args = list(big.mark = ",")) |>
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+}
+```
+
+# Samples (Method, *Samples*)
+
+```{r samples}
+raw <- map(RAW_FILES, ~ read_csv(file.path(RAW_DIR, .x), show_col_types = FALSE, guess_max = 100000))
+raw$Lab <- raw$Lab |> filter(str_detect(`Task Name`, "Stroop"))   # safeguard; the export holds only the Stroop task
+
+has_trials <- function(d) d |>
+  filter(`Response Type` == "response", Display == "Trials") |>
+  distinct(`Participant Public ID`) |> pull()
+
+flow <- imap_dfr(raw, ~ tibble(
+  sample = .y,
+  respondents_in_export = n_distinct(.x$`Participant Public ID`, na.rm = TRUE),
+  with_experimental_trials = length(has_trials(.x))))
+```
+
+The online export holds 54 respondents. A fixed random draw (seed 19) keeps 51, before any quality check, so that the
+three samples are equal in size.
+
+```{r online-draw}
+set.seed(SEED_ONLINE)
+online_ids <- sample(na.omit(unique(raw$Online$`Participant Public ID`)), size = N_PER_SAMPLE, replace = FALSE)
+stopifnot(all(online_ids %in% has_trials(raw$Online)))
+raw$Online <- raw$Online |> filter(`Participant Public ID` %in% online_ids)
+
+sample_flow <- flow |>
+  mutate(analyzed = N_PER_SAMPLE,
+         not_analyzed_no_trials = respondents_in_export - with_experimental_trials,
+         not_analyzed_draw = with_experimental_trials - analyzed)
+show_table(sample_flow, "Respondents in each raw export and in the analysis")
+write_csv(sample_flow, file.path(PROC_DIR, "sample_flow.csv"))
+```
+
+# Task structure (Method, *Task and Design*)
+
+```{r task-structure}
+structure_check <- imap_dfr(raw, function(d, s) {
+  r <- d |> filter(`Response Type` == "response")
+  per_pp <- r |> group_by(`Participant Private ID`) |>
+    summarise(practice = sum(Display == "Practice"),
+              trials   = sum(Display == "Trials"),
+              cong     = sum(Display == "Trials" & `Spreadsheet: Congruency` == "congruent"),
+              neut     = sum(Display == "Trials" & `Spreadsheet: Congruency` == "neutral"),
+              incong   = sum(Display == "Trials" & `Spreadsheet: Congruency` == "incongruent"),
+              .groups = "drop")
+  pr <- r |> filter(Display == "Practice") |> count(`Participant Private ID`, `Spreadsheet: Congruency`)
+  tibble(sample = s, respondents = nrow(per_pp),
+         practice_trials = paste(unique(per_pp$practice), collapse = "/"),
+         experimental_trials = paste(unique(per_pp$trials), collapse = "/"),
+         per_condition = paste(unique(c(per_pp$cong, per_pp$neut, per_pp$incong)), collapse = "/"),
+         practice_per_condition = paste(unique(pr$n), collapse = "/"),
+         longest_rt_ms = max(as.numeric(r$`Reaction Time`[r$Display == "Trials" & r$Response != "missed"]), na.rm = TRUE),
+         misses = sum(r$Display == "Trials" & r$Response == "missed"))
+})
+show_table(structure_check, "Task structure of the analyzed respondents")
+write_csv(structure_check, file.path(TAB_DIR, "task_structure_check.csv"))
+stopifnot(all(structure_check$practice_trials == "12"), all(structure_check$experimental_trials == "288"),
+          all(structure_check$per_condition == "96"), all(structure_check$practice_per_condition == "4"),
+          all(structure_check$longest_rt_ms <= 2000))
+```
+
+# Trial data (Method, *Data Processing and Analysis*)
+
+Only response events of the 288 main trials are kept; practice trials, instruction screens and Gorilla's logging rows
+are removed. Incorrect responses and misses are kept; no response time trimming.
+
+```{r trials}
+tidy_gorilla <- function(raw_df, sample_code) {
+  raw_df |>
+    filter(`Response Type` == "response") |>
+    transmute(sample       = sample_code,
+              ex_ID        = as.character(`Participant Public ID`),
+              ID           = as.character(`Participant Private ID`),
+              trial_number = as.integer(`Trial Number`),
+              display      = Display,
+              congruency   = `Spreadsheet: Congruency`,
+              stimulus     = `Spreadsheet: Stimulus_text`,
+              response     = as.character(Response),
+              rt           = as.numeric(`Reaction Time`),
+              correct      = as.integer(Correct == 1))
+}
+tidy <- imap(raw, ~ tidy_gorilla(.x, .y))
+rm(raw); invisible(gc())
+
+# Order-preserving codes: the i-th smallest original value becomes offset + i. The codes keep the sort order of the IDs,
+# so the seeded splits, and therefore every result, do not depend on the coding. The mapping is not saved.
+pseudo <- function(x, fmt, offset = 0) {
+  u <- sort(unique(x), method = "radix")
+  unname(setNames(sprintf(fmt, offset + seq_along(u)), u)[x])
+}
+stopifnot(n_distinct(nchar(unlist(map(tidy, "ID")))) == 1)   # equal-width IDs: text order = numeric order
+
+NON_TRIAL_DISPLAYS <- c("practice", "break", "instructions", "ready_practice", "ready_trials", "score")
+
+trials_all <- tidy |>
+  map(~ filter(.x, !tolower(display) %in% NON_TRIAL_DISPLAYS, !is.na(congruency))) |>
+  bind_rows() |>
+  mutate(sample     = factor(sample, levels = SAMPLES),
+         congruency = factor(congruency, levels = CONDITIONS),
+         missed     = response == "missed",
+         # Gorilla logs a miss on the "Too slow!" screen with Correct = 1; a miss is scored as incorrect.
+         correct    = if_else(missed, 0L, correct),
+         rt_valid   = correct == 1 & !missed) |>                  # used for response time measures
+  mutate(ID = pseudo(ID, "%d", 1000), ex_ID = pseudo(ex_ID, "X%04d")) |>
+  arrange(sample, ID, trial_number)
+
+trials_all |>
+  group_by(sample) |>
+  summarise(Respondents = n_distinct(ID), Trials = n(), Misses = sum(missed),
+            `Incorrect responses` = sum(correct == 0 & !missed), .groups = "drop") |>
+  show_table("Main trials (no exclusions, no trimming)")
+stopifnot(all(trials_all$correct[trials_all$missed] == 0))
+write_csv(trials_all, file.path(PROC_DIR, "trials_all.csv"))
+```
+
+# Respondent summaries (Method, *Data Processing and Analysis*)
+
+Task accuracy is the proportion of correct responses over all 288 trials (a miss counts as incorrect); response time
+measures use correct responses only. A congruency effect is undefined if a condition has no correct response.
+
+```{r respondent-summary}
+cond_wide <- trials_all |>
+  group_by(ID, congruency) |>
+  summarise(accuracy = mean(correct),
+            mean_rt  = if (any(rt_valid)) mean(rt[rt_valid]) else NA_real_, .groups = "drop") |>
+  pivot_wider(names_from = congruency, values_from = c(accuracy, mean_rt), names_glue = "{.value}_{congruency}")
+
+respondent_summary <- trials_all |>
+  group_by(sample, ID, ex_ID) |>
+  summarise(n_trials = n(), accuracy = mean(correct), mean_rt = mean(rt[rt_valid]),
+            n_missed = sum(missed), prop_miss = mean(missed), n_keys = n_distinct(response[!missed]),
+            .groups = "drop") |>
+  left_join(cond_wide, by = "ID") |>
+  mutate(congruency_effect = mean_rt_incongruent - mean_rt_congruent,   # incongruent - congruent
+         facilitation      = mean_rt_neutral     - mean_rt_congruent,   # neutral - congruent
+         interference      = mean_rt_incongruent - mean_rt_neutral)     # incongruent - neutral
+
+respondent_summary |>
+  group_by(sample) |>
+  summarise(n = n(), `Task accuracy` = sprintf("%.3f (%.3f)", mean(accuracy), sd(accuracy)),
+            `Mean correct RT` = sprintf("%.0f (%.0f)", mean(mean_rt), sd(mean_rt)),
+            `Congruency effect` = sprintf("%.1f (%.1f)", mean(congruency_effect, na.rm = TRUE),
+                                          sd(congruency_effect, na.rm = TRUE)), .groups = "drop") |>
+  show_table("Respondent summaries, M (SD)")
+write_csv(respondent_summary, file.path(PROC_DIR, "respondent_summary.csv"))
+```
+
+# Quality-check flags (Method, *Conventional Quality Checks*)
+
+| Flag | A respondent is flagged if |
+|---|---|
+| `flag_accuracy` | task accuracy < .80 |
+| `flag_fast_rt` | mean correct RT < 300 ms |
+| `flag_rt_3sd` | mean correct RT more than 3 *SD* from the mean of its own sample |
+| `flag_no_congruency` | no congruency effect (incongruent ≤ congruent), or either mean undefined |
+| `flag_missed` | more than 10% of trials missed |
+| `flag_invariant` | fewer than four response keys used |
+
+```{r quality-checks}
+respondent_qc <- respondent_summary |>
+  select(sample, ID, ex_ID, accuracy, mean_rt, n_missed, prop_miss, n_keys,
+         rt_cong = mean_rt_congruent, rt_incong = mean_rt_incongruent, congruency_effect) |>
+  group_by(sample) |>
+  mutate(rt_sample_mean = mean(mean_rt), rt_sample_sd = sd(mean_rt),
+         rt_z = (mean_rt - rt_sample_mean) / rt_sample_sd) |>
+  ungroup() |>
+  mutate(flag_accuracy  = accuracy  <  QC$acc_min,
+         flag_fast_rt   = mean_rt   <  QC$rt_fast_ms,
+         flag_rt_3sd    = abs(rt_z) >  QC$sd_threshold,
+         flag_no_congruency = is.na(rt_incong) | is.na(rt_cong) | rt_incong <= rt_cong,
+         flag_missed    = prop_miss >  QC$miss_max,
+         flag_invariant = n_keys    <  QC$min_keys,
+         flag_any       = flag_accuracy | flag_fast_rt | flag_rt_3sd | flag_no_congruency | flag_missed | flag_invariant)
+
+respondent_qc |> group_by(sample) |> summarise(across(starts_with("flag_"), sum), .groups = "drop") |>
+  show_table("Respondents flagged by each criterion (flagged, not excluded)")
+write_csv(respondent_qc, file.path(PROC_DIR, "respondent_qc.csv"))
+```
+
+# Integrity checks
+
+```{r integrity}
+stopifnot(n_distinct(trials_all$ID) == 3 * N_PER_SAMPLE,
+          all(count(trials_all, ID)$n == TRIALS_PER_PP),
+          all(count(trials_all, ID, congruency)$n == TRIALS_PER_PP / 3),
+          nrow(respondent_summary) == 3 * N_PER_SAMPLE, nrow(respondent_qc) == 3 * N_PER_SAMPLE,
+          !any(duplicated(respondent_summary$ID)))
+cat("Integrity checks passed: 3 samples x 51 respondents x 288 trials (96 per condition).\n")
+sessionInfo()
+```

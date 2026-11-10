@@ -1,0 +1,109 @@
+---
+title: "04 · Data processing: AGEA sample (Table S5)"
+subtitle: "A 'Human-Like' Stroop Effect No Longer Implies a Human Participant: Supplemental Material, Generalization to a Second Agent"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+Processes the 51 AGEA respondents (artificial general experiment agent) with the same rules as
+`01_data_processing.Rmd` (Supplement, *Generalization to a Second Agent › Method*: "its data were processed and analyzed
+with the same methods as the lab and AEA data"). Classification is in `05_agea_cross_agent.py`.
+
+| Section | Content | Output |
+|---|---|---|
+| 2 | Main trials, misses scored as incorrect, IDs coded | `data/processed/agea_trials.csv` |
+| 3 | 51 respondents x 288 trials (96 per condition) | `outputs/tables/agea_sample_overview.csv` |
+
+# Settings
+
+```{r settings}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+
+ROOT     <- file.path("..")
+RAW_FILE <- file.path(ROOT, "data", "raw", "raw_agea.csv")
+PROC_DIR <- file.path(ROOT, "data", "processed")
+TAB_DIR  <- file.path(ROOT, "outputs", "tables")
+walk(c(PROC_DIR, TAB_DIR), dir.create, recursive = TRUE, showWarnings = FALSE)
+
+CONDITIONS    <- c("congruent", "neutral", "incongruent")
+TRIALS_PER_PP <- 288
+
+show_table <- function(df, caption) {
+  df |> kable(caption = caption, format.args = list(big.mark = ",")) |>
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+}
+```
+
+# Trial data
+
+Same rules as `01_data_processing.Rmd`: response events of the 288 main trials only, incorrect responses and misses kept,
+a miss scored as incorrect, no trimming. IDs get the prefix `AGEA_`, so they never collide with lab or AEA IDs.
+
+```{r trials}
+tidy <- read_csv(RAW_FILE, show_col_types = FALSE, guess_max = 100000) |>
+  filter(str_detect(`Task Name`, "Stroop"), `Response Type` == "response") |>
+  transmute(source_file  = basename(RAW_FILE),
+            sample       = "AGEA",
+            orig_ID      = as.character(`Participant Private ID`),
+            ex_ID        = as.character(`Participant Public ID`),
+            trial_number = as.integer(`Trial Number`),
+            display      = Display,
+            congruency   = `Spreadsheet: Congruency`,
+            stimulus     = `Spreadsheet: Stimulus_ID`,
+            response     = as.character(Response),
+            rt           = as.numeric(`Reaction Time`),
+            correct      = as.integer(Correct == 1))
+
+NON_TRIAL_DISPLAYS <- c("practice", "break", "instructions", "ready_practice", "ready_trials", "score")
+
+# Order-preserving codes, as in 01_data_processing.Rmd; the mapping is not saved.
+pseudo <- function(x, fmt, offset = 0) {
+  u <- sort(unique(x), method = "radix")
+  unname(setNames(sprintf(fmt, offset + seq_along(u)), u)[x])
+}
+stopifnot(n_distinct(nchar(tidy$orig_ID)) == 1)    # equal-width IDs: text order = numeric order
+
+agea_trials <- tidy |>
+  filter(!tolower(display) %in% NON_TRIAL_DISPLAYS, !is.na(congruency)) |>
+  mutate(orig_ID    = pseudo(orig_ID, "%03d", 0),
+         ex_ID      = pseudo(ex_ID, "AGEAX%03d"),
+         ID         = paste0("AGEA_", orig_ID),
+         congruency = factor(congruency, levels = CONDITIONS),
+         missed     = response == "missed",
+         correct    = if_else(missed, 0L, correct),
+         rt_valid   = correct == 1 & !missed) |>
+  arrange(ID, trial_number) |>
+  select(sample, ID, orig_ID, ex_ID, source_file, trial_number, display, congruency, stimulus,
+         response, rt, correct, missed, rt_valid)
+stopifnot(all(agea_trials$correct[agea_trials$missed] == 0))
+write_csv(agea_trials, file.path(PROC_DIR, "agea_trials.csv"))
+```
+
+# Sample overview and integrity checks
+
+```{r agea-sample-overview}
+overview <- agea_trials |>
+  group_by(ID) |>
+  summarise(n_trials = n(), n_congruent = sum(congruency == "congruent"), n_neutral = sum(congruency == "neutral"),
+            n_incongruent = sum(congruency == "incongruent"), n_misses = sum(missed), .groups = "drop")
+write_csv(overview, file.path(TAB_DIR, "agea_sample_overview.csv"))
+tibble(Respondents = nrow(overview), Trials = sum(overview$n_trials), Misses = sum(overview$n_misses)) |>
+  show_table("AGEA sample")
+stopifnot(nrow(overview) == 51, all(overview$n_trials == TRIALS_PER_PP),
+          all(overview[c("n_congruent", "n_neutral", "n_incongruent")] == TRIALS_PER_PP / 3),
+          !anyDuplicated(agea_trials[c("ID", "trial_number")]))
+cat("Integrity checks passed: 51 AGEA respondents x 288 trials (96 per condition).\n")
+sessionInfo()
+```

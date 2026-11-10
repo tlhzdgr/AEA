@@ -1,0 +1,224 @@
+---
+title: "02 · Conventional quality checks: Table 1 and Figure 2"
+subtitle: "A 'Human-Like' Stroop Effect No Longer Implies a Human Participant: Results"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 7.2, fig.height = 5, dpi = 150)
+```
+
+Reproduces the Results section *Conventional Quality Checks* from the files written by `01_data_processing.Rmd`.
+
+| Manuscript (Results, *Conventional Quality Checks*) | Section here | Output |
+|---|---|---|
+| *Exclusion Criteria*: **Table 1** | 2 | `outputs/tables/table1_qc_flags.csv` |
+| *Exclusion Criteria*: the flagged online respondent; distance of AEA respondents to each threshold | 3 | `outputs/tables/exclusion_criteria_margins.csv` |
+| *Visual Inspection*: **Figure 2** and its answer key (footnote) | 4 | `outputs/figures/fig2.pdf`, `outputs/tables/fig2_answer_key.csv` |
+| *Visual Inspection*: statements about all 51 lab and 51 AEA respondents | 5 | `outputs/tables/visual_inspection_support.csv` |
+
+Figure 1 (task schematic) is a drawing, not generated from data.
+
+# Settings
+
+```{r settings}
+library(tidyverse)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+
+ROOT     <- file.path("..")
+PROC_DIR <- file.path(ROOT, "data", "processed")
+TAB_DIR  <- file.path(ROOT, "outputs", "tables")
+FIG_DIR  <- file.path(ROOT, "outputs", "figures")
+walk(c(TAB_DIR, FIG_DIR), dir.create, recursive = TRUE, showWarnings = FALSE)
+
+SAMPLES   <- c("Lab", "Online", "AEA")
+COND_COLS <- c(congruent = "#4575b4", neutral = "#9970ab", incongruent = "#d6604d")
+SEED_FIG2 <- 80      # random draw of the ten respondents in Figure 2
+
+show_table <- function(df, caption, digits = 3) {
+  df |> kable(caption = caption, digits = digits) |>
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+}
+save_csv <- function(df, name) write_csv(df, file.path(TAB_DIR, paste0(name, ".csv")))
+
+trials <- read_csv(file.path(PROC_DIR, "trials_all.csv"), show_col_types = FALSE) |>
+  mutate(ID = as.character(ID), sample = factor(sample, levels = SAMPLES),
+         congruency = factor(congruency, levels = c("congruent", "neutral", "incongruent")))
+summ <- read_csv(file.path(PROC_DIR, "respondent_summary.csv"), show_col_types = FALSE) |>
+  mutate(ID = as.character(ID), sample = factor(sample, levels = SAMPLES))
+qc <- read_csv(file.path(PROC_DIR, "respondent_qc.csv"), show_col_types = FALSE) |>
+  mutate(ID = as.character(ID), sample = factor(sample, levels = SAMPLES))
+stopifnot(nrow(summ) == 153, nrow(qc) == 153, nrow(trials) == 153 * 288)
+```
+
+# Table 1 (Results, *Exclusion Criteria*)
+
+```{r table-1-quality-checks}
+crit <- c(flag_accuracy      = "Task accuracy < .80",
+          flag_fast_rt       = "Mean correct RT < 300 ms",
+          flag_rt_3sd        = "Mean correct RT > 3 SD from sample mean",
+          flag_no_congruency = "No congruency effect (incongruent <= congruent)",
+          flag_missed        = "Misses > 10% of trials",
+          flag_invariant     = "Fewer than four response keys used",
+          flag_any           = "Flagged by any criterion")
+
+table1 <- qc |>
+  select(sample, all_of(names(crit))) |>
+  pivot_longer(-sample, names_to = "flag") |>
+  group_by(flag, sample) |> summarise(n = sum(value), .groups = "drop") |>
+  pivot_wider(names_from = sample, values_from = n) |>
+  arrange(match(flag, names(crit)))
+table1 |> mutate(flag = crit[flag]) |> show_table("Table 1")
+save_csv(table1, "table1_qc_flags")
+```
+
+# Exclusion Criteria text (Results, *Exclusion Criteria*)
+
+*"their lowest task accuracy was .92, their fastest mean correct response time was 584 ms, no AEA respondent had more
+than 3 misses in 288 trials, and every AEA respondent showed a congruency effect of at least 113 ms"*; *"a single
+respondent was flagged: its task accuracy was .65, and it had no correct response on incongruent trials"*.
+
+```{r exclusion-criteria-margins}
+margins <- qc |> group_by(sample) |>
+  summarise(lowest_task_accuracy = min(accuracy), fastest_mean_correct_rt = min(mean_rt),
+            most_misses = max(n_missed), smallest_congruency_effect = min(congruency_effect, na.rm = TRUE),
+            largest_abs_rt_z = max(abs(rt_z)), fewest_keys = min(n_keys), .groups = "drop")
+show_table(margins, "Most extreme value of each quality-check measure, by sample")
+save_csv(margins, "exclusion_criteria_margins")
+
+flagged <- qc |> filter(flag_any)
+flagged_incongruent <- trials |> filter(ID %in% flagged$ID, congruency == "incongruent") |>
+  summarise(incongruent_trials = n(), correct_responses = sum(rt_valid), misses = sum(missed))
+show_table(bind_cols(flagged |> select(sample, accuracy, rt_incong), flagged_incongruent), "The flagged respondent")
+```
+
+# Figure 2 (Results, *Visual Inspection*)
+
+Five lab and five AEA respondents are drawn at random (seed 80), shuffled and labeled P1 to P10.
+
+```{r figure-2-visual-inspection, fig.height = 7.2}
+set.seed(SEED_FIG2)
+lab_ids   <- trials |> filter(sample == "Lab") |> distinct(ID) |> pull() |> sample(5)
+aea_ids   <- trials |> filter(sample == "AEA") |> distinct(ID) |> pull() |> sample(5)
+panel_ids <- sample(c(lab_ids, aea_ids))
+panel_labels <- setNames(paste0("P", seq_along(panel_ids)), panel_ids)
+
+quiz <- trials |> filter(ID %in% panel_ids) |> mutate(panel = factor(panel_labels[ID], levels = paste0("P", 1:10)))
+rt_ok <- quiz |> filter(correct == 1, !missed)
+
+kde_max <- rt_ok |> group_by(panel, congruency) |>
+  summarise(peak = tryCatch(max(density(rt, from = 0, to = 2000, n = 400)$y), error = \(e) NA_real_),
+            .groups = "drop") |>
+  pull(peak) |> max(na.rm = TRUE)
+
+acc_ann <- quiz |> group_by(panel, congruency) |>
+  summarise(acc = mean(correct), .groups = "drop") |>
+  mutate(label = sprintf("%.0f%%", acc * 100), row_idx = as.integer(congruency) - 1,
+         x_sq = 1480, x_txt = 1560, y_pos = kde_max * (0.97 - row_idx * 0.15))
+
+p_rt <- ggplot(rt_ok, aes(x = rt, fill = congruency, colour = congruency)) +
+  geom_density(alpha = 0.45, linewidth = 0.65, bounds = c(0, 2000)) +
+  geom_point(data = acc_ann, aes(x = x_sq, y = y_pos, colour = congruency),
+             shape = 15, size = 2.8, inherit.aes = FALSE, show.legend = FALSE) +
+  geom_text(data = acc_ann, aes(x = x_txt, y = y_pos, label = label, colour = congruency),
+            size = 2.1, hjust = 0, inherit.aes = FALSE, show.legend = FALSE) +
+  facet_wrap(~panel, nrow = 2) +
+  scale_fill_manual(values = COND_COLS, name = NULL) +
+  scale_colour_manual(values = COND_COLS, name = NULL) +
+  scale_x_continuous(limits = c(0, 2000), breaks = c(0, 1000, 2000)) +
+  scale_y_continuous(limits = c(0, kde_max * 1.06), labels = NULL) +
+  labs(x = "Response time (ms)", y = "Density", tag = "a)") +
+  guides(fill = guide_legend(override.aes = list(shape = 15, size = 3.5, alpha = 1)),
+         colour = guide_legend(override.aes = list(shape = 15, size = 3.5))) +
+  theme_minimal(base_size = 9) +
+  theme(strip.text = element_text(size = 8), axis.ticks.y = element_blank(),
+        panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+        legend.position = "top", legend.justification = "right",
+        legend.text = element_text(size = 7.5), legend.key.size = unit(0.4, "cm"),
+        plot.tag = element_text(face = "bold", size = 11))
+
+effect_data <- rt_ok |> group_by(panel, congruency) |>
+  summarise(mean_rt = mean(rt), .groups = "drop") |>
+  pivot_wider(names_from = congruency, values_from = mean_rt) |>
+  mutate(congruency_effect = incongruent - congruent)
+
+p_effect <- ggplot(effect_data, aes(x = congruency_effect, y = fct_rev(panel))) +
+  geom_col(fill = "#8c8c8c", alpha = 0.90, width = 0.66) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "#444444", linewidth = 0.6) +
+  scale_x_continuous(expand = expansion(mult = 0.02)) +
+  labs(x = "Congruency effect (incongruent − congruent RT, ms)", y = NULL, tag = "b)") +
+  theme_minimal(base_size = 9) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+        plot.tag = element_text(face = "bold", size = 11))
+
+fig2 <- (p_rt / p_effect) + plot_layout(heights = c(1.60, 0.65))
+fig2
+ggsave(file.path(FIG_DIR, "fig2.pdf"), fig2, width = 7.2, height = 7.2, device = cairo_pdf)
+ggsave(file.path(FIG_DIR, "fig2.png"), fig2, width = 7.2, height = 7.2, dpi = 300)
+```
+
+## Figure 2 answer key (footnote)
+
+```{r figure-2-answer-key}
+fig2_key <- tibble(panel = paste0("P", 1:10), ID = panel_ids,
+                   sample = if_else(panel_ids %in% aea_ids, "AEA", "Lab")) |>
+  left_join(summ |> select(ID, accuracy, congruency_effect), by = "ID")
+show_table(fig2_key, "Figure 2 answer key")
+save_csv(fig2_key, "fig2_answer_key")
+
+key_aea <- fig2_key$panel[fig2_key$sample == "AEA"]
+key_lab <- fig2_key$panel[fig2_key$sample == "Lab"]
+cat("AEA:", paste(key_aea, collapse = ", "), "| Lab:", paste(key_lab, collapse = ", "), "\n")
+```
+
+# Visual Inspection text (Results, *Visual Inspection*)
+
+*"Both groups showed right-skewed response time distributions, high accuracy, and a positive congruency effect, and this
+held for all 51 lab and all 51 AEA respondents. ... the AEA respondents had more skewed distributions and larger
+congruency effects on average, mainly because of larger facilitation"* (Table S3).
+
+```{r visual-inspection-support}
+skew <- function(v) { v <- v[!is.na(v)]; mean((v - mean(v))^3) / sd(v)^3 * (length(v) / (length(v) - 1))^1.5 }
+visual_support <- trials |> filter(rt_valid, sample %in% c("Lab", "AEA")) |>
+  group_by(sample, ID) |> summarise(rt_skew = skew(rt), .groups = "drop") |>
+  left_join(summ |> select(ID, accuracy, congruency_effect, facilitation, interference), by = "ID") |>
+  group_by(sample) |>
+  summarise(respondents = n(), right_skewed = sum(rt_skew > 0), mean_skew = mean(rt_skew),
+            lowest_accuracy = min(accuracy), positive_congruency_effect = sum(congruency_effect > 0),
+            mean_congruency_effect = mean(congruency_effect), mean_facilitation = mean(facilitation),
+            mean_interference = mean(interference), .groups = "drop")
+show_table(visual_support, "Visual Inspection statements, all lab and AEA respondents")
+save_csv(visual_support, "visual_inspection_support")
+```
+
+# Checks
+
+Numbers quoted in the Results; knitting stops if one has changed.
+
+```{r checks}
+m <- margins |> filter(sample == "AEA")
+v <- visual_support |> column_to_rownames("sample")
+stopifnot(
+  identical(unname(unlist(table1[table1$flag == "flag_any", c("Lab", "Online", "AEA")])), c(0L, 1L, 0L)),
+  identical(unname(unlist(table1[table1$flag == "flag_accuracy", c("Lab", "Online", "AEA")])), c(0L, 1L, 0L)),
+  identical(unname(unlist(table1[table1$flag == "flag_no_congruency", c("Lab", "Online", "AEA")])), c(0L, 1L, 0L)),
+  sprintf("%.2f", m$lowest_task_accuracy) == "0.92", round(m$fastest_mean_correct_rt) == 584,
+  m$most_misses == 3, floor(m$smallest_congruency_effect) == 113,
+  nrow(flagged) == 1, as.character(flagged$sample) == "Online", round(flagged$accuracy, 2) == .65,
+  flagged_incongruent$correct_responses == 0,
+  all(v$right_skewed == 51), all(v$positive_congruency_effect == 51),
+  v["AEA", "mean_skew"] > v["Lab", "mean_skew"], v["AEA", "mean_congruency_effect"] > v["Lab", "mean_congruency_effect"],
+  v["AEA", "mean_facilitation"] - v["Lab", "mean_facilitation"] > v["AEA", "mean_interference"] - v["Lab", "mean_interference"],
+  length(key_aea) == 5, length(key_lab) == 5)
+cat("All checks passed.\n")
+sessionInfo()
+```
